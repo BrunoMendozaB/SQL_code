@@ -1,0 +1,166 @@
+WITH latlon AS (
+  SELECT
+  ride_id,
+	(split_part(pickup_location, '-', 1))::float AS lat1,
+	split_part(pickup_location, '-', 2)::float*(-1) AS lon1,
+	split_part(dropoff_location, '-', 1)::float AS lat2,
+	split_part(dropoff_location, '-', 2)::float*(-1) AS lon2
+  FROM ride_requests
+),
+	
+calcs AS (
+SELECT
+  ride_id,lat1,lat2,lon1,lon2,
+  radians(lat2 - lat1) AS dLat, 
+	radians(lon2 - lon1) as dLon
+
+FROM latlon
+  ),
+  
+calcs2 AS (
+SELECT  
+  ride_id,lat1,lat2,lon1,lon2,dLat,dLon,
+  (sin(dLat / 2) * sin(dLat / 2)+cos(radians(lat1))*cos(radians(lat2))*sin(dLon / 2) * sin(dLon / 2)) as xlat
+FROM calcs),
+	
+distance as (
+SELECT 
+  ride_id,
+  2 * atan2(sqrt(xlat), sqrt(1 - xlat)) * 6371 AS distance_km
+FROM calcs2),
+
+dist_rng AS (
+SELECT 
+	ride_id,
+	CASE 
+    	WHEN distance_km <=5 THEN '0-5 km'
+      WHEN distance_km <=15 THEN '5-15 km'
+      WHEN distance_km >15 THEN '>15 km' END as distance_range
+FROM distance
+  ),
+
+metrocartot AS (
+SELECT m.*, distance_km, distance_range,
+  	CASE 
+    	WHEN purchase_amount_usd <=15 THEN '10-15 USD'
+      WHEN purchase_amount_usd <21 THEN '16-20 USD'
+      WHEN purchase_amount_usd <26 THEN '21-25 USD'
+      WHEN purchase_amount_usd >25 THEN '26-30 USD' END as Price_range,
+    CASE
+      WHEN EXTRACT(HOUR FROM request_ts) BETWEEN 7 AND 9 AND EXTRACT(DOW FROM request_ts) BETWEEN 1 AND 5 THEN 'High Demand'
+      WHEN EXTRACT(HOUR FROM request_ts) BETWEEN 16 AND 19 AND EXTRACT(DOW FROM request_ts) BETWEEN 1 AND 5 THEN 'High Demand'
+      WHEN EXTRACT(DOW FROM request_ts) IN (5, 6) AND EXTRACT(HOUR FROM request_ts) BETWEEN 20 AND 23 THEN 'High Demand'
+      WHEN EXTRACT(DOW FROM request_ts) IN (5, 6) AND EXTRACT(HOUR FROM request_ts) BETWEEN 0 AND 6 THEN 'High Demand'
+      WHEN EXTRACT(HOUR FROM request_ts) BETWEEN 9 AND 16 AND EXTRACT(DOW FROM request_ts) BETWEEN 1 AND 5 THEN 'Normal Demand'
+      WHEN EXTRACT(HOUR FROM request_ts) BETWEEN 20 AND 23 AND EXTRACT(DOW FROM request_ts) BETWEEN 1 AND 4 THEN 'Normal Demand'
+  		ELSE 'Low Demand'
+    END AS demand_category,
+  	distance_km/purchase_amount_usd as price_factor
+  
+FROM metrocar m
+  
+LEFT JOIN distance ON m.ride_id = distance.ride_id
+LEFT JOIN dist_rng ON m.ride_id = dist_rng.ride_id
+),
+
+funnel1 AS (
+SELECT
+    '1 App Download' AS funnel_name,
+    platform, age_range,
+    COUNT(DISTINCT(app_download_key)) AS user_count,
+    0 AS ride_count, price_range,
+      distance_range, demand_category
+FROM metrocartot 
+GROUP BY
+    platform, age_range,purchase_amount_usd,distance_range,price_range,demand_category
+),
+
+funnel2 AS (
+SELECT
+    '2 Signup' AS funnel_name,
+    platform,age_range,
+    COUNT(DISTINCT user_id) AS user_count,
+   0 AS ride_count, Price_range,
+      distance_range, demand_category
+FROM metrocartot
+
+WHERE
+    user_id IS NOT NULL
+GROUP BY
+platform, age_range,purchase_amount_usd,distance_range,price_range,demand_category
+),
+
+funnel3 AS (
+SELECT
+    '3 Requested Ride' AS funnel_name,
+    platform,age_range,
+    COUNT(DISTINCT user_id) AS user_count,
+    COUNT(DISTINCT ride_id) AS ride_count,
+    Price_range,
+      distance_range, demand_category
+FROM metrocartot
+WHERE
+    ride_id IS NOT NULL
+GROUP BY
+platform, age_range,purchase_amount_usd,distance_range,price_range,demand_category
+  ),
+
+
+funnel4 AS (
+SELECT
+    '4 Driver Accept' AS funnel_name,
+    platform,age_range,
+    COUNT(DISTINCT user_id) AS user_count,
+    COUNT(DISTINCT ride_id) AS ride_count,
+    Price_range,
+      distance_range, demand_category
+FROM metrocartot
+WHERE
+    accept_ts IS NOT NULL
+GROUP BY
+platform, age_range,purchase_amount_usd,distance_range,price_range,demand_category
+),
+
+funnel5 AS (
+SELECT
+    '5 Ride Completed and Paid' AS funnel_name,
+    platform,age_range,
+    COUNT(DISTINCT user_id) AS user_count,
+    COUNT(DISTINCT ride_id) AS ride_count,
+    Price_range,
+      distance_range, demand_category
+FROM metrocartot
+WHERE
+    dropoff_ts IS NOT NULL
+GROUP BY
+platform, age_range,purchase_amount_usd,distance_range,price_range,demand_category
+),
+
+
+funnel6 AS (
+SELECT
+    '6 Reviewed' AS funnel_name,
+    platform,age_range,
+    COUNT(DISTINCT user_id) AS user_count,
+    COUNT(DISTINCT ride_id) AS ride_count,
+    Price_range,
+      distance_range, demand_category
+FROM metrocartot
+WHERE
+    review_id IS NOT NULL
+GROUP BY
+platform, age_range,purchase_amount_usd,distance_range,price_range,demand_category
+  )
+  
+  
+ SELECT * FROM funnel1
+  UNION ALL
+ SELECT * FROM funnel2
+  UNION ALL
+ SELECT * FROM funnel3
+  UNION ALL
+ SELECT * FROM funnel4
+  UNION ALL
+ SELECT * FROM funnel5
+  UNION ALL
+ SELECT * FROM funnel6
